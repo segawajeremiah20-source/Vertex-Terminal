@@ -1,0 +1,72 @@
+name: Build Vertex Terminal Android APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openjdk-17-jdk-headless git zip unzip autoconf automake libtool pkg-config cmake libffi-dev libssl-dev zlib1g-dev
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Rust for Android
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Extract the original project archive
+        run: |
+          unzip -q vertex_terminal_mobile.zip
+          test -f vertex_terminal_mobile/main.py
+          test -f vertex_terminal_mobile/build_android.py
+
+      - name: Install Android build tools
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install PySide6==6.12.0 buildozer cython jinja2 pkginfo tqdm
+
+      - name: Download official PySide6 Android wheels
+        working-directory: vertex_terminal_mobile
+        run: |
+          mkdir -p wheels
+          curl --fail --location --retry 3 -o wheels/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl https://download.qt.io/official_releases/QtForPython/pyside6/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl
+          curl --fail --location --retry 3 -o wheels/shiboken6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl https://download.qt.io/official_releases/QtForPython/shiboken6/shiboken6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl
+
+      - name: Build ARM64 APK
+        working-directory: vertex_terminal_mobile
+        run: |
+          python build_android.py --wheel-pyside wheels/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl --wheel-shiboken wheels/shiboken6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl --name VertexTerminal -f
+
+      - name: Collect APK
+        run: |
+          APK_PATH="$(find vertex_terminal_mobile -type f -name '*.apk' -print -quit)"
+          if [ -z "$APK_PATH" ]; then
+            echo "Build completed without producing an APK."
+            exit 1
+          fi
+          mkdir -p output
+          cp "$APK_PATH" output/VertexTerminal-debug.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VertexTerminal-Android-APK
+          path: output/VertexTerminal-debug.apk
+          if-no-files-found: error
+          retention-days: 14
