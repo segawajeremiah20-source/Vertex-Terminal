@@ -1,3 +1,4 @@
+
 name: Build Vertex Terminal Android APK
 
 on:
@@ -18,7 +19,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y openjdk-17-jdk-headless git zip unzip autoconf automake libtool pkg-config cmake libffi-dev libssl-dev libltdl-dev zlib1g-dev
+          sudo apt-get install -y openjdk-17-jdk-headless git zip unzip autoconf automake libtool pkg-config cmake libffi-dev libssl-dev libltdl-dev zlib1g-dev file
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -63,10 +64,73 @@ jobs:
           mkdir -p output
           cp "$APK_PATH" output/VertexTerminal-debug.apk
 
-      - name: Upload APK artifact
+      - name: Diagnose APK
+        run: |
+          set +e
+
+          APK="output/VertexTerminal-debug.apk"
+          REPORT="output/APK-Diagnostic-Report.txt"
+
+          {
+            echo "VERTEX TERMINAL APK DIAGNOSTIC REPORT"
+            echo "====================================="
+            echo ""
+            echo "APK FILE INFORMATION"
+            ls -lh "$APK"
+            file "$APK"
+
+            echo ""
+            echo "ZIP INTEGRITY TEST"
+            unzip -t "$APK"
+
+            echo ""
+            echo "ANDROID BUILD TOOLS"
+            SDK="$HOME/.buildozer/android/platform/android-sdk"
+
+            AAPT="$(find "$SDK/build-tools" -type f -name aapt 2>/dev/null | sort -V | tail -n 1)"
+            APKSIGNER="$(find "$SDK/build-tools" -type f -name apksigner 2>/dev/null | sort -V | tail -n 1)"
+            ZIPALIGN="$(find "$SDK/build-tools" -type f -name zipalign 2>/dev/null | sort -V | tail -n 1)"
+
+            echo "AAPT: ${AAPT:-NOT FOUND}"
+            echo "APKSIGNER: ${APKSIGNER:-NOT FOUND}"
+            echo "ZIPALIGN: ${ZIPALIGN:-NOT FOUND}"
+
+            echo ""
+            echo "ANDROID PACKAGE DETAILS"
+            if [ -n "$AAPT" ]; then
+              "$AAPT" dump badging "$APK"
+            else
+              echo "AAPT unavailable"
+            fi
+
+            echo ""
+            echo "SIGNATURE VERIFICATION"
+            if [ -n "$APKSIGNER" ]; then
+              "$APKSIGNER" verify --verbose --print-certs "$APK"
+            else
+              echo "APKSIGNER unavailable"
+            fi
+
+            echo ""
+            echo "ZIP ALIGNMENT"
+            if [ -n "$ZIPALIGN" ]; then
+              "$ZIPALIGN" -c -v 4 "$APK"
+            else
+              echo "ZIPALIGN unavailable"
+            fi
+
+            echo ""
+            echo "APK NATIVE LIBRARIES"
+            unzip -l "$APK" | grep -E 'lib/.*\.so$'
+
+          } 2>&1 | tee "$REPORT"
+
+      - name: Upload APK and diagnostic report
         uses: actions/upload-artifact@v4
         with:
           name: VertexTerminal-Android-APK
-          path: output/VertexTerminal-debug.apk
+          path: |
+            output/VertexTerminal-debug.apk
+            output/APK-Diagnostic-Report.txt
           if-no-files-found: error
           retention-days: 14
