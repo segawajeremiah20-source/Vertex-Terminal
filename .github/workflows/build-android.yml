@@ -33,7 +33,7 @@ jobs:
         with:
           targets: aarch64-linux-android
 
-      - name: Extract the original project archive
+      - name: Extract original project
         run: |
           unzip -q vertex_terminal_mobile.zip
           test -f vertex_terminal_mobile/main.py
@@ -48,19 +48,27 @@ jobs:
         working-directory: vertex_terminal_mobile
         run: |
           mkdir -p wheels
-          curl --fail --location --retry 3 -o wheels/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl https://download.qt.io/official_releases/QtForPython/pyside6/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl
-          curl --fail --location --retry 3 -o wheels/shiboken6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl https://download.qt.io/official_releases/QtForPython/shiboken6/shiboken6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl
+          curl --fail --location --retry 3 \
+            -o wheels/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl \
+            https://download.qt.io/official_releases/QtForPython/pyside6/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl
+
+          curl --fail --location --retry 3 \
+            -o wheels/shiboken6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl \
+            https://download.qt.io/official_releases/QtForPython/pyside6/shiboken6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl
 
       - name: Build ARM64 APK
         working-directory: vertex_terminal_mobile
         run: |
-          python build_android.py --wheel-pyside wheels/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl --wheel-shiboken wheels/shiboken6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl --name VertexTerminal -f
+          python build_android.py \
+            --wheel-pyside wheels/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl \
+            --wheel-shiboken wheels/shiboken6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl \
+            --name VertexTerminal -f
 
       - name: Collect APK
         run: |
           APK_PATH="$(find vertex_terminal_mobile -type f -name '*.apk' -print -quit)"
           if [ -z "$APK_PATH" ]; then
-            echo "Build completed without producing an APK."
+            echo "No APK was produced."
             exit 1
           fi
           mkdir -p output
@@ -69,65 +77,34 @@ jobs:
       - name: Diagnose APK
         run: |
           set +e
-
           APK="output/VertexTerminal-debug.apk"
+          SDK="$HOME/.buildozer/android/platform/android-sdk"
           REPORT="output/APK-Diagnostic-Report.txt"
 
           {
-            echo "VERTEX TERMINAL APK DIAGNOSTIC REPORT"
-            echo "====================================="
-            echo ""
-            echo "APK FILE INFORMATION"
+            echo "VERTEX TERMINAL APK REPORT"
+            echo "=========================="
             ls -lh "$APK"
-            file "$APK"
-
-            echo ""
-            echo "ZIP INTEGRITY TEST"
             unzip -t "$APK"
 
-            echo ""
-            echo "ANDROID BUILD TOOLS"
-            SDK="$HOME/.buildozer/android/platform/android-sdk"
+            AAPT="$(find "$SDK/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+            APKSIGNER="$(find "$SDK/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+            ZIPALIGN="$(find "$SDK/build-tools" -type f -name zipalign | sort -V | tail -n 1)"
 
-            AAPT="$(find "$SDK/build-tools" -type f -name aapt 2>/dev/null | sort -V | tail -n 1)"
-            APKSIGNER="$(find "$SDK/build-tools" -type f -name apksigner 2>/dev/null | sort -V | tail -n 1)"
-            ZIPALIGN="$(find "$SDK/build-tools" -type f -name zipalign 2>/dev/null | sort -V | tail -n 1)"
+            echo "PACKAGE DETAILS"
+            "$AAPT" dump badging "$APK"
 
-            echo "AAPT: ${AAPT:-NOT FOUND}"
-            echo "APKSIGNER: ${APKSIGNER:-NOT FOUND}"
-            echo "ZIPALIGN: ${ZIPALIGN:-NOT FOUND}"
+            echo "SIGNATURE CHECK"
+            "$APKSIGNER" verify --verbose --print-certs "$APK"
 
-            echo ""
-            echo "ANDROID PACKAGE DETAILS"
-            if [ -n "$AAPT" ]; then
-              "$AAPT" dump badging "$APK"
-            else
-              echo "AAPT unavailable"
-            fi
-
-            echo ""
-            echo "SIGNATURE VERIFICATION"
-            if [ -n "$APKSIGNER" ]; then
-              "$APKSIGNER" verify --verbose --print-certs "$APK"
-            else
-              echo "APKSIGNER unavailable"
-            fi
-
-            echo ""
             echo "ZIP ALIGNMENT"
-            if [ -n "$ZIPALIGN" ]; then
-              "$ZIPALIGN" -c -v 4 "$APK"
-            else
-              echo "ZIPALIGN unavailable"
-            fi
+            "$ZIPALIGN" -c -v 4 "$APK"
 
-            echo ""
-            echo "APK NATIVE LIBRARIES"
+            echo "NATIVE LIBRARIES"
             unzip -l "$APK" | grep -E 'lib/.*\.so$'
-
           } 2>&1 | tee "$REPORT"
 
-      - name: Upload APK and diagnostic report
+      - name: Upload APK and report
         uses: actions/upload-artifact@v4
         with:
           name: VertexTerminal-Android-APK
