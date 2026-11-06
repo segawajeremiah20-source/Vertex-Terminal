@@ -16,10 +16,12 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Use preinstalled Java and CMake
         run: |
+          java -version
+          cmake --version
           sudo apt-get update
-          sudo apt-get install -y openjdk-17-jdk-headless git zip unzip autoconf automake libtool pkg-config cmake libffi-dev libssl-dev libltdl-dev zlib1g-dev file
+          sudo apt-get install -y libltdl-dev
 
       - name: Set up Python
         uses: actions/setup-python@v5
