@@ -22,7 +22,11 @@ jobs:
           sudo apt-get install -y \
             build-essential cmake ninja-build \
             libltdl-dev unzip curl patchelf \
-            openjdk-11-jdk git
+            openjdk-11-jdk git \
+            clang-14 llvm-14 \
+            libclang-14-dev \
+            llvm-14-dev \
+            libclang-cpp14-dev
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -61,15 +65,32 @@ jobs:
           python -m pip install \
             -r qt-pyside/tools/cross_compile_android/requirements.txt
 
+      - name: Check Clang installation
+        run: |
+          clang-14 --version
+          llvm-config-14 --version
+          dpkg -L libclang-14-dev | head -40
+          find /usr/lib/llvm-14 -name ClangConfig.cmake
+
       - name: Cross compile PySide6 Android wheels
         run: |
           cd qt-pyside
+          set -o pipefail
           python tools/cross_compile_android/main.py \
             --plat-name=aarch64 \
             --api-level=27 \
             --qt-install-path="$HOME/Qt/6.6.3" \
             --auto-accept-license \
-            --skip-update
+            --skip-update \
+            --verbose 2>&1 | tee ../qt66-build.log
+
+      - name: Upload build error log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Qt66-Build-Log
+          path: qt66-build.log
+          if-no-files-found: ignore
 
       - name: Locate generated Android wheels
         id: wheels
