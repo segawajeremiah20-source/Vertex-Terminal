@@ -7,6 +7,8 @@ on:
 jobs:
   inspect:
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
     steps:
       - name: Checkout Vertex Terminal
         uses: actions/checkout@v4
@@ -16,18 +18,60 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Check source ZIP
+        run: |
+          if [ ! -f vertex_terminal_mobile.zip ]; then
+            echo "ERROR: vertex_terminal_mobile.zip was not found."
+            ls -la
+            exit 1
+          fi
+
+          mkdir -p mobile-source
+          unzip -q vertex_terminal_mobile.zip -d mobile-source
+          echo "Source ZIP extracted successfully."
+
       - name: Download Qt for Python 6.6 source
         run: |
-          git clone --depth 1 --branch 6.6 https://github.com/pyside/pyside-setup.git qt-pyside
+          git clone --depth 1 --branch 6.6 \
+            https://github.com/pyside/pyside-setup.git qt-pyside
+
           test -f qt-pyside/tools/cross_compile_android/main.py
+          echo "Qt Android cross-compilation script found."
 
-      - name: Check Android cross-compilation options
+      - name: Inspect Qt Android build options
         run: |
-          echo "Qt for Python source version:"
+          echo "Qt for Python version:"
           git -C qt-pyside describe --tags --always
-          echo "Available Android build options:"
-          grep -n "add_argument" qt-pyside/tools/cross_compile_android/main.py
-          echo "Checking required build script files..."
-          test -f build_android.py
-          echo "Inspection completed."
 
+          echo "Available Android build options:"
+          grep -n "add_argument" \
+            qt-pyside/tools/cross_compile_android/main.py
+
+      - name: Locate Vertex Terminal source files
+        run: |
+          echo "Searching for main.py..."
+          MAIN_FILE=$(find mobile-source -type f \
+            -name main.py -print -quit)
+
+          echo "Searching for build_android.py..."
+          BUILD_FILE=$(find . \
+            -type f \
+            -name build_android.py \
+            -not -path "./qt-pyside/*" \
+            -not -path "./.git/*" \
+            -print -quit)
+
+          if [ -z "$MAIN_FILE" ]; then
+            echo "ERROR: main.py was not found."
+            exit 1
+          fi
+
+          if [ -z "$BUILD_FILE" ]; then
+            echo "ERROR: build_android.py was not found."
+            find mobile-source -maxdepth 4 -type f | head -100
+            exit 1
+          fi
+
+          echo "Found application entry point: $MAIN_FILE"
+          echo "Found Android build script: $BUILD_FILE"
+          echo "All inspection checks passed."
