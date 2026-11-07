@@ -1,3 +1,4 @@
+
 name: Build Vertex Terminal Android APK
 
 on:
@@ -47,7 +48,6 @@ jobs:
         working-directory: vertex_terminal_mobile
         run: |
           mkdir -p wheels
-
           curl --fail --location --retry 3 \
             -o wheels/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl \
             https://download.qt.io/official_releases/QtForPython/pyside6/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl
@@ -65,6 +65,11 @@ jobs:
           ls -lh wheels/
           test -s wheels/pyside6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl
           test -s wheels/shiboken6-6.12.0-6.12.0-cp310-abi3-android_aarch64.whl
+
+      - name: Remove stale APK files
+        working-directory: vertex_terminal_mobile
+        run: |
+          find . -type f -name '*.apk' -delete
 
       - name: Build Vertex Terminal APK
         working-directory: vertex_terminal_mobile
@@ -86,9 +91,12 @@ jobs:
           mkdir -p output
           cp "$APK_PATH" output/VertexTerminal-debug.apk
 
+          echo "APK selected: $APK_PATH"
+          ls -lh output/VertexTerminal-debug.apk
+
       - name: Diagnose APK
         run: |
-          set +e
+          set -e
 
           APK="output/VertexTerminal-debug.apk"
           SDK="$HOME/.buildozer/android/platform/android-sdk"
@@ -96,6 +104,7 @@ jobs:
           {
             echo "VERTEX TERMINAL APK DIAGNOSTIC REPORT"
             echo "====================================="
+
             ls -lh "$APK"
 
             echo "ZIP INTEGRITY"
@@ -104,6 +113,10 @@ jobs:
             AAPT="$(find "$SDK/build-tools" -type f -name aapt | sort -V | tail -n 1)"
             APKSIGNER="$(find "$SDK/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
             ZIPALIGN="$(find "$SDK/build-tools" -type f -name zipalign | sort -V | tail -n 1)"
+
+            test -n "$AAPT"
+            test -n "$APKSIGNER"
+            test -n "$ZIPALIGN"
 
             echo "PACKAGE DETAILS"
             "$AAPT" dump badging "$APK"
