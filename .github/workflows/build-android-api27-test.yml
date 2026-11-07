@@ -1,1 +1,33 @@
 
+name: Check Qt 6.6 Android Build Support
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Vertex Terminal
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download Qt for Python 6.6 source
+        run: |
+          git clone --depth 1 --branch 6.6 https://github.com/pyside/pyside-setup.git qt-pyside
+          test -f qt-pyside/tools/cross_compile_android/main.py
+
+      - name: Check Android cross-compilation options
+        run: |
+          echo "Qt for Python source version:"
+          git -C qt-pyside describe --tags --always
+          echo "Available Android build options:"
+          grep -n "add_argument" qt-pyside/tools/cross_compile_android/main.py
+          echo "Checking required build script files..."
+          test -f build_android.py
+          echo "Inspection completed."
+
