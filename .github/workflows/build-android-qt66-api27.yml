@@ -90,10 +90,7 @@ jobs:
               )
 
           path.write_text(source)
-
-          print(
-              f"SUCCESS: Qt host path patch applied ({count} match(es))."
-          )
+          print(f"SUCCESS: Qt host path patch applied ({count} match(es)).")
           PY
 
       - name: Install cross compilation requirements
@@ -104,10 +101,9 @@ jobs:
           python -m pip install \
             -r qt-pyside/tools/cross_compile_android/requirements.txt
 
-      - name: Check Qt installations
+      - name: Check Qt and compiler installations
         run: |
           echo "Checking host Qt..."
-          test -d "$HOME/Qt/6.6.3/gcc_64"
           test -f "$HOME/Qt/6.6.3/gcc_64/bin/qmake"
 
           echo "Checking Android Qt..."
@@ -117,8 +113,7 @@ jobs:
           clang-14 --version
           llvm-config-14 --version
 
-          echo "Checking Qt host path..."
-          echo "$HOME/Qt/6.6.3/gcc_64"
+          echo "Qt installations are ready."
 
       - name: Cross compile PySide6 Android wheels
         run: |
@@ -126,8 +121,19 @@ jobs:
 
           export QT_HOST_PATH="$HOME/Qt/6.6.3/gcc_64"
 
+          # PySide Android deployment uses Android NDK r25c.
+          # Set its expected location before the deployment tool runs.
+          export ANDROID_NDK_ROOT="$HOME/.pyside6_android_deploy/android-ndk/android-ndk-r25c"
+          export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
+
+          # Make Android NDK system headers visible to Clang/libclang.
+          export CPATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include${CPATH:+:$CPATH}"
+          export C_INCLUDE_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include${C_INCLUDE_PATH:+:$C_INCLUDE_PATH}"
+          export CPLUS_INCLUDE_PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+
           echo "Host Qt: $QT_HOST_PATH"
           echo "Android Qt: $HOME/Qt/6.6.3/android_arm64_v8a"
+          echo "Expected Android NDK: $ANDROID_NDK_ROOT"
 
           set -o pipefail
 
@@ -138,6 +144,25 @@ jobs:
             --auto-accept-license \
             --skip-update \
             --verbose 2>&1 | tee ../qt66-build.log
+
+      - name: Verify Android wheels and NDK headers
+        if: success()
+        run: |
+          echo "Checking Android NDK OpenGL header..."
+
+          NDK_HEADER="$HOME/.pyside6_android_deploy/android-ndk/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/GLES2/gl2.h"
+
+          if [ ! -f "$NDK_HEADER" ]; then
+            echo "Expected GLES2 header was not found."
+            echo "Searching for its actual location..."
+            find "$HOME" -path '*/sysroot/usr/include/GLES2/gl2.h' -print
+            exit 1
+          fi
+
+          echo "GLES2 header found."
+
+          echo "Checking generated wheels..."
+          find qt-pyside/dist_android -name '*.whl' -ls
 
       - name: Upload build error log
         if: always()
@@ -202,15 +227,24 @@ jobs:
 
           mkdir -p output
 
-          cp "$APK" \
-            output/VertexTerminal-Qt66-debug.apk
+          cp "$APK" output/VertexTerminal-Qt66-API27.apk
 
+          echo "APK created:"
           ls -lh output/
+
+      - name: Verify APK package
+        run: |
+          APK="output/VertexTerminal-Qt66-API27.apk"
+
+          test -f "$APK"
+          unzip -t "$APK"
+
+          echo "APK file integrity check passed."
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: VertexTerminal-Qt66-API27
-          path: output/VertexTerminal-Qt66-debug.apk
+          path: output/VertexTerminal-Qt66-API27.apk
           if-no-files-found: error
           retention-days: 14
