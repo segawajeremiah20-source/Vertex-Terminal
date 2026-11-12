@@ -58,6 +58,33 @@ jobs:
           git clone --depth 1 --branch 6.6 \
             https://github.com/pyside/pyside-setup.git qt-pyside
 
+      - name: Patch Qt host path detection
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("qt-pyside/build_scripts/qtinfo.py")
+          source = path.read_text()
+
+          old = '''                if self._qt_target_path:
+                      cmake_cache_args.append(("QFP_QT_TARGET_PATH", self._qt_target_path))'''
+
+          new = '''                if self._qt_target_path:
+                      cmake_cache_args.append(("QFP_QT_TARGET_PATH", self._qt_target_path))
+
+                  qt_host_path = os.environ.get("QT_HOST_PATH")
+                  if qt_host_path:
+                      cmake_cache_args.append(("QT_HOST_PATH", qt_host_path))'''
+
+          if old not in source:
+              raise SystemExit("Could not find the expected Qt path code.")
+
+          source = source.replace(old, new)
+          path.write_text(source)
+
+          print("Qt host path detection patched.")
+          PY
+
       - name: Install cross compilation requirements
         run: |
           python -m pip install \
@@ -65,17 +92,21 @@ jobs:
           python -m pip install \
             -r qt-pyside/tools/cross_compile_android/requirements.txt
 
-      - name: Check Clang installation
+      - name: Check Qt installations
         run: |
+          test -f "$HOME/Qt/6.6.3/gcc_64/lib/cmake/Qt6/Qt6Config.cmake"
+          test -f "$HOME/Qt/6.6.3/android_arm64_v8a/lib/cmake/Qt6/Qt6Config.cmake"
           clang-14 --version
           llvm-config-14 --version
-          dpkg -L libclang-14-dev | head -40
-          find /usr/lib/llvm-14 -name ClangConfig.cmake
+          echo "Host and Android Qt installations found."
 
       - name: Cross compile PySide6 Android wheels
         run: |
           cd qt-pyside
+          export QT_HOST_PATH="$HOME/Qt/6.6.3/gcc_64"
+          echo "Using host Qt: $QT_HOST_PATH"
           set -o pipefail
+
           python tools/cross_compile_android/main.py \
             --plat-name=aarch64 \
             --api-level=27 \
