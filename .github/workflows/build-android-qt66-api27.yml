@@ -166,6 +166,16 @@ jobs:
             --skip-update \
             --verbose 2>&1 | tee ../qt66-build.log
 
+      # Prints the important lines of the huge build log so the real error
+      # is visible without downloading anything.
+      - name: Show build errors
+        if: failure()
+        run: |
+          echo "===== First errors ====="
+          grep -nE "CMake Error|error:|FAILED:|Traceback|fatal error|No such file" qt66-build.log | head -40 || true
+          echo "===== Last 80 lines ====="
+          tail -80 qt66-build.log || true
+
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
