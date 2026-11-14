@@ -166,15 +166,42 @@ jobs:
             --skip-update \
             --verbose 2>&1 | tee ../qt66-build.log
 
-      # Prints the important lines of the huge build log so the real error
-      # is visible without downloading anything.
+      # Copies the important lines of the huge build log into annotations,
+      # which are visible on the job page even when logs need a sign-in.
       - name: Show build errors
         if: failure()
         run: |
-          echo "===== First errors ====="
-          grep -nE "CMake Error|error:|FAILED:|Traceback|fatal error|No such file" qt66-build.log | head -40 || true
-          echo "===== Last 80 lines ====="
-          tail -80 qt66-build.log || true
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          def esc(s):
+              return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+          p = Path("qt66-build.log")
+          if not p.exists():
+              print("::error title=No build log::qt66-build.log was not created")
+              raise SystemExit(0)
+
+          lines = p.read_text(errors="replace").splitlines()
+          pat = re.compile(r"CMake Error|error:|FAILED:|Traceback|fatal error|No such file|ERROR|Exception")
+          hits = [f"{i + 1}: {l[:300]}" for i, l in enumerate(lines) if pat.search(l)]
+
+          first = "\n".join(hits[:15])[:3500]
+          last_hits = "\n".join(hits[-15:])[:3500]
+          tail = "\n".join(l[:300] for l in lines[-25:])[:3500]
+
+          print(f"===== {len(lines)} log lines, {len(hits)} error-like lines =====")
+          print(first)
+          print("===== last error-like lines =====")
+          print(last_hits)
+          print("===== tail =====")
+          print(tail)
+
+          print(f"::error title=First error lines ({len(lines)} log lines total)::{esc(first)}")
+          print(f"::error title=Last error lines::{esc(last_hits)}")
+          print(f"::error title=Last 25 log lines::{esc(tail)}")
+          PY
 
       - name: Upload build log
         if: always()
