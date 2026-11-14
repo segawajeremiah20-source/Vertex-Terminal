@@ -137,9 +137,47 @@ jobs:
           llvm-config-14 --version
           echo "Qt installations and host compiler are ready."
 
+      # Shiboken asks the host compiler ("g++ -E -x c++ - -v") where its C++
+      # headers are and then parses Qt with them. For an Android build that
+      # picks Ubuntu's libstdc++ headers, which clash with Android's bionic
+      # headers (__GLIBC_PREREQ / __c_locale errors). These wrappers answer
+      # only that one query with the NDK's libc++ + bionic header paths and
+      # pass every other call straight through to the real compiler.
+      - name: Create Shiboken compiler-query wrapper
+        run: |
+          mkdir -p "$RUNNER_TEMP/gppwrap"
+          cat > "$RUNNER_TEMP/gppwrap/g++" <<'WRAP'
+          #!/usr/bin/env bash
+          REAL="/usr/bin/$(basename "$0")"
+          NDK_ROOT="${ANDROID_NDK_ROOT:-$HOME/.pyside6_android_deploy/android-ndk/android-ndk-r25c}"
+          SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          if [ "$*" = "-E -x c++ - -v" ] && [ -d "$SYSROOT/usr/include/c++/v1" ]; then
+            echo "intercepted: $0 $*" >> "${GPPWRAP_LOG:-/tmp/gppwrap.log}"
+            cat >&2 <<EOF
+          #include <...> search starts here:
+           $SYSROOT/usr/include/c++/v1
+           $SYSROOT/usr/include/aarch64-linux-android
+           $SYSROOT/usr/include
+          End of search list.
+          EOF
+            exit 0
+          fi
+          exec "$REAL" "$@"
+          WRAP
+          cp "$RUNNER_TEMP/gppwrap/g++" "$RUNNER_TEMP/gppwrap/c++"
+          chmod +x "$RUNNER_TEMP/gppwrap/g++" "$RUNNER_TEMP/gppwrap/c++"
+          # Sanity check: pass-through must still behave like the real g++.
+          PATH="$RUNNER_TEMP/gppwrap:$PATH" g++ --version | head -1
+          PATH="$RUNNER_TEMP/gppwrap:$PATH" c++ --version | head -1
+
       - name: Cross compile PySide6 Android wheels
         run: |
           cd qt-pyside
+
+          export PATH="$RUNNER_TEMP/gppwrap:$PATH"
+          export GPPWRAP_LOG="$RUNNER_TEMP/gppwrap/calls.log"
+          : > "$GPPWRAP_LOG"
+          hash -r
 
           export QT_HOST_PATH="$HOME/Qt/6.6.3/gcc_64"
 
@@ -148,7 +186,8 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
 
           NDK_SYSROOT="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          export ANDROID_NDK_SYSROOT_INCLUDE="$NDK_SYSROOT/usr/include:$NDK_SYSROOT/usr/include/aarch64-linux-android"
+          # Order matters: libc++ first, then the arch headers, then bionic's C headers.
+          export ANDROID_NDK_SYSROOT_INCLUDE="$NDK_SYSROOT/usr/include/c++/v1:$NDK_SYSROOT/usr/include/aarch64-linux-android:$NDK_SYSROOT/usr/include"
 
           echo "Host Qt: $QT_HOST_PATH"
           echo "Android Qt: $HOME/Qt/6.6.3/android_arm64_v8a"
@@ -172,7 +211,7 @@ jobs:
         if: failure()
         run: |
           python - <<'PY'
-          import re
+          import os, re
           from pathlib import Path
 
           def esc(s):
@@ -187,20 +226,32 @@ jobs:
           pat = re.compile(r"CMake Error|error:|FAILED:|Traceback|fatal error|No such file|ERROR|Exception")
           hits = [f"{i + 1}: {l[:300]}" for i, l in enumerate(lines) if pat.search(l)]
 
-          first = "\n".join(hits[:15])[:3500]
-          last_hits = "\n".join(hits[-15:])[:3500]
-          tail = "\n".join(l[:300] for l in lines[-25:])[:3500]
+          # Lines right after the first ninja "FAILED:" (the real first error).
+          after = ""
+          for i, l in enumerate(lines):
+              if l.startswith("FAILED:"):
+                  after = "\n".join(f"{j + 1}: {x[:300]}" for j, x in enumerate(lines[i:i + 16], start=i))[:3500]
+                  break
+
+          last_hits = "\n".join(hits[-12:])[:3500]
+          tail = "\n".join(l[:300] for l in lines[-20:])[:3500]
+
+          log = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "gppwrap" / "calls.log"
+          calls = log.read_text().splitlines() if log.exists() else []
+          wrap = f"wrapper intercepted {len(calls)} compiler-path queries"
+          if calls:
+              wrap += "\n" + calls[0][:300]
 
           print(f"===== {len(lines)} log lines, {len(hits)} error-like lines =====")
-          print(first)
+          print(wrap)
+          print(after)
           print("===== last error-like lines =====")
           print(last_hits)
-          print("===== tail =====")
-          print(tail)
 
-          print(f"::error title=First error lines ({len(lines)} log lines total)::{esc(first)}")
+          print(f"::error title=Wrapper status::{esc(wrap)}")
+          print(f"::error title=After first FAILED ({len(lines)} log lines total)::{esc(after)}")
           print(f"::error title=Last error lines::{esc(last_hits)}")
-          print(f"::error title=Last 25 log lines::{esc(tail)}")
+          print(f"::error title=Last 20 log lines::{esc(tail)}")
           PY
 
       - name: Upload build log
