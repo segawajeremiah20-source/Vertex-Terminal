@@ -56,6 +56,10 @@ jobs:
           # Shiboken 6.6 searches for "llvm-config" without the version suffix.
           mkdir -p "$RUNNER_TEMP/llvm-bin"
           ln -sf "$(command -v llvm-config-14)" "$RUNNER_TEMP/llvm-bin/llvm-config"
+
+          # GITHUB_PATH updates later steps only. Export PATH here as well,
+          # because this step immediately invokes llvm-config below.
+          export PATH="$RUNNER_TEMP/llvm-bin:$LLVM_PREFIX/bin:$PATH"
           echo "$RUNNER_TEMP/llvm-bin" >> "$GITHUB_PATH"
           echo "$LLVM_PREFIX/bin" >> "$GITHUB_PATH"
 
@@ -63,6 +67,7 @@ jobs:
           echo "CLANG_INSTALL_DIR=$LLVM_PREFIX" >> "$GITHUB_ENV"
           echo "CLANG_RESOURCE_DIR=$CLANG_RESOURCE_DIR" >> "$GITHUB_ENV"
 
+          command -v llvm-config
           llvm-config --version
           clang-14 --version
           echo "LLVM prefix: $LLVM_PREFIX"
