@@ -15,7 +15,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Free up disk space
+      - name: Free up runner disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
           sudo apt-get clean
@@ -28,8 +28,8 @@ jobs:
             build-essential cmake ninja-build \
             libltdl-dev unzip curl patchelf \
             openjdk-11-jdk git \
-            clang-14 llvm-14 \
-            libclang-14-dev llvm-14-dev libclang-cpp14-dev
+            clang-14 llvm-14 llvm-14-dev \
+            libclang-14-dev libclang-cpp14-dev
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -42,15 +42,43 @@ jobs:
           distribution: temurin
           java-version: "11"
 
+      - name: Configure Clang and LLVM for Shiboken
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LLVM_PREFIX="$(llvm-config-14 --prefix)"
+          CLANG_RESOURCE_DIR="$(clang-14 -print-resource-dir)"
+
+          test -d "$LLVM_PREFIX"
+          test -d "$CLANG_RESOURCE_DIR/include"
+
+          # Shiboken 6.6 searches for "llvm-config" without the version suffix.
+          mkdir -p "$RUNNER_TEMP/llvm-bin"
+          ln -sf "$(command -v llvm-config-14)" "$RUNNER_TEMP/llvm-bin/llvm-config"
+          echo "$RUNNER_TEMP/llvm-bin" >> "$GITHUB_PATH"
+          echo "$LLVM_PREFIX/bin" >> "$GITHUB_PATH"
+
+          echo "LLVM_INSTALL_DIR=$LLVM_PREFIX" >> "$GITHUB_ENV"
+          echo "CLANG_INSTALL_DIR=$LLVM_PREFIX" >> "$GITHUB_ENV"
+          echo "CLANG_RESOURCE_DIR=$CLANG_RESOURCE_DIR" >> "$GITHUB_ENV"
+
+          llvm-config --version
+          clang-14 --version
+          echo "LLVM prefix: $LLVM_PREFIX"
+          echo "Clang resource directory: $CLANG_RESOURCE_DIR"
+
       - name: Extract original application
         run: |
+          set -euo pipefail
           test -f vertex_terminal_mobile.zip
           unzip -q vertex_terminal_mobile.zip
           test -f vertex_terminal_mobile/main.py
           test -f vertex_terminal_mobile/build_android.py
 
-      - name: Install Qt 6.6 tools
+      - name: Install Qt 6.6.3 host and Android packages
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install aqtinstall
           aqt install-qt linux desktop 6.6.3 gcc_64 -O "$HOME/Qt"
@@ -63,32 +91,59 @@ jobs:
           git clone --depth 1 --branch 6.6 \
             https://github.com/pyside/pyside-setup.git qt-pyside
 
-      - name: Patch Shiboken Android parser include paths
+      - name: Patch Shiboken with Android cross-compiler settings
+        shell: bash
         run: |
+          set -euo pipefail
           python - <<'PY'
           from pathlib import Path
 
           path = Path("qt-pyside/sources/pyside6/cmake/Macros/PySideModules.cmake")
           source = path.read_text()
 
-          needle = " --api-version=${SUPPORTED_QT_VERSION})"
-          addition = needle + """
-          if(DEFINED ENV{ANDROID_NDK_SYSROOT_INCLUDE})
-            list(APPEND shiboken_command
-              "--system-include-paths=$ENV{ANDROID_NDK_SYSROOT_INCLUDE}")
-          endif()
+          anchor = "        --api-version=${SUPPORTED_QT_VERSION})"
+          if source.count(anchor) != 1:
+              raise SystemExit(
+                  "ERROR: Could not uniquely locate the Shiboken command in "
+                  "PySideModules.cmake"
+              )
+
+          # Backport the Android cross-compilation logic used by newer
+          # PySide sources. Shiboken must query the NDK compiler with the
+          # Android target and API level; adding NDK include paths alone
+          # leaves Ubuntu's host libstdc++ paths in the parser command.
+          addition = anchor + """
+
+              if(CMAKE_CROSSCOMPILING)
+                  list(APPEND shiboken_command
+                       "--platform=${CMAKE_SYSTEM_NAME}"
+                       "--arch=${CMAKE_SYSTEM_PROCESSOR}"
+                       "--compiler-path=${CMAKE_CXX_COMPILER}")
+              endif()
+
+              if(CMAKE_ANDROID_ARCH_LLVM_TRIPLE)
+                  set(android_triple
+                      "${CMAKE_ANDROID_ARCH_LLVM_TRIPLE}${CMAKE_ANDROID_API}")
+                  list(APPEND shiboken_command
+                       "--compiler-argument=--target=${android_triple}"
+                       "--clang-option=--target=${android_triple}")
+              elseif(CMAKE_SYSTEM_NAME STREQUAL "Android")
+                  message(FATAL_ERROR
+                      "Android Shiboken build is missing CMAKE_ANDROID_ARCH_LLVM_TRIPLE")
+              endif()
           """
 
-          if source.count(needle) != 1:
-              raise SystemExit("ERROR: Shiboken command insertion point was not unique")
-
-          path.write_text(source.replace(needle, addition, 1))
-          print("SUCCESS: Android NDK headers are configured for Shiboken.")
+          path.write_text(source.replace(anchor, addition, 1))
+          print("SUCCESS: Shiboken now receives the NDK compiler and Android target triple.")
           PY
 
+          grep -n -A18 -B3 'CMAKE_ANDROID_ARCH_LLVM_TRIPLE' \
+            qt-pyside/sources/pyside6/cmake/Macros/PySideModules.cmake
+
       - name: Patch Qt host path detection
+        shell: bash
         run: |
-          grep -n 'QFP_QT_TARGET_PATH' qt-pyside/build_scripts/qtinfo.py || true
+          set -euo pipefail
           python - <<'PY'
           from pathlib import Path
           import re
@@ -96,7 +151,10 @@ jobs:
           path = Path("qt-pyside/build_scripts/qtinfo.py")
           source = path.read_text()
 
-          pattern = r'(?m)^([ ]*)cmake_cache_args\.append\(\("QFP_QT_TARGET_PATH", self\._qt_target_path\)\)$'
+          pattern = (
+              r'(?m)^([ ]*)cmake_cache_args\.append\('
+              r'\("QFP_QT_TARGET_PATH", self\._qt_target_path\)\)$'
+          )
 
           def replacement(match):
               indent = match.group(1)
@@ -110,102 +168,258 @@ jobs:
           source, count = re.subn(pattern, replacement, source)
           if count != 2:
               raise SystemExit(
-                  f"ERROR: Expected two Qt target path lines in qtinfo.py, found {count}"
+                  f"ERROR: Expected two Qt target path locations in qtinfo.py; found {count}"
               )
 
           if not re.search(r'(?m)^import os\b', source):
               source = "import os\n" + source
 
           path.write_text(source)
-          print(f"SUCCESS: Qt host path patch applied to {count} locations.")
+          print(f"SUCCESS: Qt host path supplied at {count} locations.")
           PY
 
-      - name: Install cross compilation requirements
+      - name: Install cross-compilation Python requirements
         run: |
+          set -euo pipefail
           python -m pip install -r qt-pyside/requirements.txt
           python -m pip install -r qt-pyside/tools/cross_compile_android/requirements.txt
 
-      - name: Check Qt and compiler installations
+      - name: Check Qt, LLVM and Clang installations
         run: |
+          set -euo pipefail
           test -f "$HOME/Qt/6.6.3/gcc_64/bin/qmake"
           test -d "$HOME/Qt/6.6.3/android_arm64_v8a"
+          test -d "$LLVM_INSTALL_DIR"
+          test -d "$CLANG_RESOURCE_DIR/include"
+          command -v llvm-config
+          llvm-config --version
           clang-14 --version
-          llvm-config-14 --version
-          echo "Qt installations and host compiler are ready."
-
-      - name: Create Shiboken compiler-query wrapper
-        run: |
-          mkdir -p "$RUNNER_TEMP/gppwrap"
-          cat > "$RUNNER_TEMP/gppwrap/wrapper" <<'WRAP'
-          #!/usr/bin/env bash
-          set -u
-
-          REAL="/usr/bin/$(basename "$0")"
-          NDK_ROOT="${ANDROID_NDK_ROOT:-$HOME/.pyside6_android_deploy/android-ndk/android-ndk-r25c}"
-          SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          LOG="${GPPWRAP_LOG:-/tmp/gppwrap.log}"
-
-          echo "called: $0 $*" >> "$LOG"
-
-          has_E=0
-          has_v=0
-          has_cxx=0
-          args=("$@")
-
-          for ((i = 0; i < ${#args[@]}; i++)); do
-            case "${args[$i]}" in
-              -E) has_E=1 ;;
-              -v) has_v=1 ;;
-              -xc++) has_cxx=1 ;;
-              -x)
-                if [ "$((i + 1))" -lt "${#args[@]}" ] \
-                    && [ "${args[$((i + 1))]}" = "c++" ]; then
-                  has_cxx=1
-                fi
-                ;;
-            esac
-          done
-
-          # Do not require the NDK directory to exist here. The PySide Android
-          # helper downloads it later; Shiboken's compiler probe runs afterward.
-          if [ "$has_E" = 1 ] && [ "$has_v" = 1 ] && [ "$has_cxx" = 1 ]; then
-            echo "intercepted: $0 $*" >> "$LOG"
-            cat >&2 <<EOF
-          #include <...> search starts here:
-           $SYSROOT/usr/include/c++/v1
-           $SYSROOT/usr/include/aarch64-linux-android
-           $SYSROOT/usr/include
-          End of search list.
-          EOF
-            exit 0
-          fi
-
-          exec "$REAL" "$@"
-          WRAP
-
-          for compiler in g++ c++ g++-11 c++-11; do
-            cp "$RUNNER_TEMP/gppwrap/wrapper" "$RUNNER_TEMP/gppwrap/$compiler"
-            chmod +x "$RUNNER_TEMP/gppwrap/$compiler"
-          done
+          echo "Host Qt, Android Qt, LLVM and Clang are ready."
 
       - name: Cross compile PySide6 Android wheels
+        shell: bash
         run: |
+          set -euo pipefail
           cd qt-pyside
 
-          export PATH="$RUNNER_TEMP/gppwrap:$PATH"
-          export GPPWRAP_LOG="$RUNNER_TEMP/gppwrap/calls.log"
-          : > "$GPPWRAP_LOG"
-          hash -r
-
           export QT_HOST_PATH="$HOME/Qt/6.6.3/gcc_64"
+
+          # The PySide 6.6 helper downloads NDK r25c into this cache.
+          # These paths are supplied before the helper starts; the NDK is
+          # present by the time its Android CMake configuration runs.
           export ANDROID_NDK_ROOT="$HOME/.pyside6_android_deploy/android-ndk/android-ndk-r25c"
           export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
-          export LLVM_INSTALL_DIR="/usr/lib/llvm-14"
-          export CLANG_INSTALL_DIR="$LLVM_INSTALL_DIR"
+          export ANDROID_NDK_SYSROOT="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 
-          NDK_SYSROOT="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          export ANDROID_NDK_SYSROOT_INCLUDE="$NDK_SYSROOT/usr/include/c++/v1:$NDK_SYSROOT/usr/include/aarch64-linux-android:$NDK_SYSROOT/usr/include"
+          echo "Host Qt: $QT_HOST_PATH"
+          echo "Android Qt: $HOME/Qt/6.6.3/android_arm64_v8a"
+          echo "NDK expected at: $ANDROID_NDK_ROOT"
+          echo "LLVM install: $LLVM_INSTALL_DIR"
+          echo "Clang resource dir: $CLANG_RESOURCE_DIR"
 
-          echo "Testing Shiboken compiler-query wrapper..."
-          printf '' | g++ -E -x c++ - -v](#)
-
+          # Do not set CPATH, C_INCLUDE_PATH, CPLUS_INCLUDE_PATH or replace
+          # the host compiler. Shiboken uses the NDK compiler path supplied
+          # by CMake and the Android target flags patched above.
+          python tools/cross_compile_android/main.py \
+            --plat-name=aarch64 \
+            --api-level=27 \
+            --qt-install-path="$HOME/Qt/6.6.3" \
+            --auto-accept-license \
+            --skip-update \
+            --verbose 2>&1 | tee ../qt66-build.log
+
+      - name: Report first build failure
+        if: failure()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          log = Path("qt66-build.log")
+          if not log.exists():
+              print("::error title=Build log missing::qt66-build.log was not created")
+              raise SystemExit(0)
+
+          lines = log.read_text(errors="replace").splitlines()
+          patterns = re.compile(
+              r"CMake Error|error:|FAILED:|Traceback|fatal error|"
+              r"No such file|ERROR|Exception|Unable to locate Clang"
+          )
+          hits = [
+              f"{i + 1}: {line[:350]}"
+              for i, line in enumerate(lines)
+              if patterns.search(line)
+          ]
+
+          first_failure = ""
+          for i, line in enumerate(lines):
+              if line.startswith("FAILED:"):
+                  first_failure = "\n".join(
+                      f"{j + 1}: {lines[j][:350]}"
+                      for j in range(i, min(i + 18, len(lines)))
+                  )
+                  break
+
+          print(f"Build log lines: {len(lines)}")
+          print("===== First failed command =====")
+          print(first_failure or "No Ninja FAILED line found.")
+          print("===== Last error-like lines =====")
+          print("\n".join(hits[-20:]) or "No error-like lines found.")
+
+          def escape(value):
+              return (
+                  value.replace("%", "%25")
+                  .replace("\r", "%0D")
+                  .replace("\n", "%0A")
+              )
+
+          print(f"::error title=First failed command::{escape(first_failure)}")
+          print(f"::error title=Last error lines::{escape(chr(10).join(hits[-12:]))}")
+          PY
+
+      - name: Upload PySide build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Qt66-Build-Log
+          path: qt66-build.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Verify Android wheels and NDK headers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NDK_HEADER="$HOME/.pyside6_android_deploy/android-ndk/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/GLES2/gl2.h"
+          test -f "$NDK_HEADER" || {
+            echo "ERROR: Android GLES2 header was not found."
+            find "$HOME/.pyside6_android_deploy" \
+              -path '*/sysroot/usr/include/GLES2/gl2.h' -print
+            exit 1
+          }
+
+          PYSIDE_WHEEL="$(find qt-pyside/dist_android \
+            -name 'PySide6-*-android_aarch64.whl' -print -quit)"
+          SHIBOKEN_WHEEL="$(find qt-pyside/dist_android \
+            -name 'shiboken6-*-android_aarch64.whl' -print -quit)"
+
+          test -n "$PYSIDE_WHEEL"
+          test -n "$SHIBOKEN_WHEEL"
+
+          # This exact host include path was present in the failed run.
+          # Stop if it reappears in Shiboken's Clang parser command.
+          if grep -E 'cmd\[[0-9]+\]=-isystem/usr/include/c\+\+/11' qt66-build.log; then
+            echo "ERROR: Shiboken is still using Ubuntu host libstdc++ headers."
+            exit 1
+          fi
+
+          ls -lh "$PYSIDE_WHEEL" "$SHIBOKEN_WHEEL"
+          echo "SUCCESS: Android PySide6 and Shiboken wheels were built."
+
+      - name: Locate generated Android wheels
+        id: wheels
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PYSIDE="$(find qt-pyside/dist_android \
+            -name 'PySide6-*-android_aarch64.whl' -print -quit)"
+          SHIBOKEN="$(find qt-pyside/dist_android \
+            -name 'shiboken6-*-android_aarch64.whl' -print -quit)"
+
+          if [ -z "$PYSIDE" ] || [ -z "$SHIBOKEN" ]; then
+            echo "ERROR: Required Android wheels were not found."
+            find qt-pyside -name '*.whl' -print
+            exit 1
+          fi
+
+          echo "pyside=$GITHUB_WORKSPACE/$PYSIDE" >> "$GITHUB_OUTPUT"
+          echo "shiboken=$GITHUB_WORKSPACE/$SHIBOKEN" >> "$GITHUB_OUTPUT"
+          ls -lh "$PYSIDE" "$SHIBOKEN"
+
+      - name: Install Android packaging tools
+        run: |
+          set -euo pipefail
+          python -m pip install \
+            PySide6==6.6.3 \
+            buildozer cython jinja2 pkginfo tqdm
+
+      - name: Build Vertex Terminal APK
+        working-directory: vertex_terminal_mobile
+        run: |
+          set -euo pipefail
+          python build_android.py \
+            --wheel-pyside "${{ steps.wheels.outputs.pyside }}" \
+            --wheel-shiboken "${{ steps.wheels.outputs.shiboken }}" \
+            --name VertexTerminal -f
+
+      - name: Collect and verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$(find vertex_terminal_mobile -type f -name '*.apk' -print -quit)"
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not produced."
+            exit 1
+          fi
+
+          mkdir -p output
+          cp "$APK" output/VertexTerminal-Qt66-API27.apk
+          APK="output/VertexTerminal-Qt66-API27.apk"
+
+          unzip -t "$APK"
+          unzip -Z1 "$APK" | grep -q '^lib/arm64-v8a/' || {
+            echo "ERROR: APK does not contain arm64-v8a native libraries."
+            exit 1
+          }
+
+          # Verify the APK's actual minimum SDK instead of assuming that
+          # compiling PySide with --api-level=27 sets the manifest minimum.
+          AAPT=""
+          for ROOT in \
+            "$HOME/.buildozer" \
+            "$HOME/.pyside6_android_deploy" \
+            "$HOME/Android/Sdk" \
+            "${ANDROID_HOME:-}" \
+            "${ANDROID_SDK_ROOT:-}"; do
+            if [ -n "$ROOT" ] && [ -d "$ROOT" ]; then
+              AAPT="$(find "$ROOT" -type f -name aapt -print -quit 2>/dev/null || true)"
+              [ -n "$AAPT" ] && break
+            fi
+          done
+
+          if [ -z "$AAPT" ]; then
+            echo "ERROR: Android aapt was not found; cannot verify APK minSdk."
+            exit 1
+          fi
+
+          BADGING="$("$AAPT" dump badging "$APK")"
+          MIN_SDK="$(printf '%s\n' "$BADGING" | \
+            sed -n "s/^sdkVersion:'\([0-9][0-9]*\)'.*/\1/p" | head -1)"
+
+          if [ -z "$MIN_SDK" ]; then
+            echo "ERROR: Could not read the APK minimum SDK."
+            printf '%s\n' "$BADGING" | head -30
+            exit 1
+          fi
+
+          echo "APK minimum SDK: $MIN_SDK"
+          if [ "$MIN_SDK" -gt 27 ]; then
+            echo "ERROR: APK minSdk $MIN_SDK is too high for an API 27 device."
+            exit 1
+          fi
+
+          echo "SUCCESS: APK integrity, ABI and minSdk checks passed."
+          sha256sum "$APK"
+          ls -lh "$APK"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VertexTerminal-Qt66-API27
+          path: output/VertexTerminal-Qt66-API27.apk
+          if-no-files-found: error
+          retention-days: 14
