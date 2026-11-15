@@ -109,9 +109,6 @@ jobs:
               )
 
           source, count = re.subn(pattern, replacement, source)
-          # qtinfo.py has two call sites: _get_query_properties and
-          # _get_cmake_mkspecs_variables. Both run a CMake config test that
-          # needs QT_HOST_PATH when cross-compiling.
           if count != 2:
               raise SystemExit(
                   f"ERROR: Expected two Qt target path lines in qtinfo.py, found {count}"
@@ -148,25 +145,34 @@ jobs:
           mkdir -p "$RUNNER_TEMP/gppwrap"
           cat > "$RUNNER_TEMP/gppwrap/g++" <<'WRAP'
           #!/usr/bin/env bash
+          set -u
+
           REAL="/usr/bin/$(basename "$0")"
           NDK_ROOT="${ANDROID_NDK_ROOT:-$HOME/.pyside6_android_deploy/android-ndk/android-ndk-r25c}"
           SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          if [ "$*" = "-E -x c++ - -v" ] && [ -d "$SYSROOT/usr/include/c++/v1" ]; then
+          TARGET_ARCH="${TARGET_ARCH:-aarch64-linux-android}"
+
+          # Shiboken probes the host compiler with this exact query:
+          #   g++ -E -x c++ - -v
+          # We must answer with the Android sysroot include dirs, not the Linux host ones.
+          if [ "${1:-}" = "-E" ] && [ "${2:-}" = "-x" ] && [ "${3:-}" = "c++" ] && [ "${4:-}" = "-" ] && [ "${5:-}" = "-v" ] && [ -d "$SYSROOT/usr/include/c++/v1" ]; then
             echo "intercepted: $0 $*" >> "${GPPWRAP_LOG:-/tmp/gppwrap.log}"
             cat >&2 <<EOF
           #include <...> search starts here:
            $SYSROOT/usr/include/c++/v1
-           $SYSROOT/usr/include/aarch64-linux-android
+           $SYSROOT/usr/include/$TARGET_ARCH
            $SYSROOT/usr/include
           End of search list.
           EOF
             exit 0
           fi
+
           exec "$REAL" "$@"
           WRAP
           cp "$RUNNER_TEMP/gppwrap/g++" "$RUNNER_TEMP/gppwrap/c++"
           chmod +x "$RUNNER_TEMP/gppwrap/g++" "$RUNNER_TEMP/gppwrap/c++"
-          # Sanity check: pass-through must still behave like the real g++.
+
+          echo "Wrapper sanity check:"
           PATH="$RUNNER_TEMP/gppwrap:$PATH" g++ --version | head -1
           PATH="$RUNNER_TEMP/gppwrap:$PATH" c++ --version | head -1
 
@@ -188,6 +194,9 @@ jobs:
           NDK_SYSROOT="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           # Order matters: libc++ first, then the arch headers, then bionic's C headers.
           export ANDROID_NDK_SYSROOT_INCLUDE="$NDK_SYSROOT/usr/include/c++/v1:$NDK_SYSROOT/usr/include/aarch64-linux-android:$NDK_SYSROOT/usr/include"
+
+          # Tell the wrapper which target architecture is being used.
+          export TARGET_ARCH="aarch64-linux-android"
 
           echo "Host Qt: $QT_HOST_PATH"
           echo "Android Qt: $HOME/Qt/6.6.3/android_arm64_v8a"
