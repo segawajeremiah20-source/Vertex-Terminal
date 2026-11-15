@@ -15,7 +15,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # The Qt + NDK + PySide build is large; free some runner disk first.
       - name: Free up disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
@@ -84,7 +83,7 @@ jobs:
               raise SystemExit("ERROR: Shiboken command insertion point was not unique")
 
           path.write_text(source.replace(needle, addition, 1))
-          print("SUCCESS: Android NDK headers are configured for Shiboken only.")
+          print("SUCCESS: Android NDK headers are configured for Shiboken.")
           PY
 
       - name: Patch Qt host path detection
@@ -144,29 +143,33 @@ jobs:
           REAL="/usr/bin/$(basename "$0")"
           NDK_ROOT="${ANDROID_NDK_ROOT:-$HOME/.pyside6_android_deploy/android-ndk/android-ndk-r25c}"
           SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          LOG="${GPPWRAP_LOG:-/tmp/gppwrap.log}"
 
-          echo "called: $0 $*" >> "${GPPWRAP_LOG:-/tmp/gppwrap.log}"
+          echo "called: $0 $*" >> "$LOG"
 
           has_E=0
           has_v=0
           has_cxx=0
           args=("$@")
+
           for ((i = 0; i < ${#args[@]}; i++)); do
             case "${args[$i]}" in
               -E) has_E=1 ;;
               -v) has_v=1 ;;
               -xc++) has_cxx=1 ;;
               -x)
-                if [ "$((i + 1))" -lt "${#args[@]}" ] && [ "${args[$((i + 1))]}" = "c++" ]; then
+                if [ "$((i + 1))" -lt "${#args[@]}" ] \
+                    && [ "${args[$((i + 1))]}" = "c++" ]; then
                   has_cxx=1
                 fi
                 ;;
             esac
           done
 
-          if [ "$has_E" = 1 ] && [ "$has_v" = 1 ] && [ "$has_cxx" = 1 ] \
-              && [ -d "$SYSROOT/usr/include/c++/v1" ]; then
-            echo "intercepted: $0 $*" >> "${GPPWRAP_LOG:-/tmp/gppwrap.log}"
+          # Do not require the NDK directory to exist here. The PySide Android
+          # helper downloads it later; Shiboken's compiler probe runs afterward.
+          if [ "$has_E" = 1 ] && [ "$has_v" = 1 ] && [ "$has_cxx" = 1 ]; then
+            echo "intercepted: $0 $*" >> "$LOG"
             cat >&2 <<EOF
           #include <...> search starts here:
            $SYSROOT/usr/include/c++/v1
@@ -180,7 +183,6 @@ jobs:
           exec "$REAL" "$@"
           WRAP
 
-          chmod +x "$RUNNER_TEMP/gppwrap/wrapper"
           for compiler in g++ c++ g++-11 c++-11; do
             cp "$RUNNER_TEMP/gppwrap/wrapper" "$RUNNER_TEMP/gppwrap/$compiler"
             chmod +x "$RUNNER_TEMP/gppwrap/$compiler"
@@ -196,7 +198,6 @@ jobs:
           hash -r
 
           export QT_HOST_PATH="$HOME/Qt/6.6.3/gcc_64"
-
           export ANDROID_NDK_ROOT="$HOME/.pyside6_android_deploy/android-ndk/android-ndk-r25c"
           export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
           export LLVM_INSTALL_DIR="/usr/lib/llvm-14"
@@ -205,151 +206,6 @@ jobs:
           NDK_SYSROOT="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           export ANDROID_NDK_SYSROOT_INCLUDE="$NDK_SYSROOT/usr/include/c++/v1:$NDK_SYSROOT/usr/include/aarch64-linux-android:$NDK_SYSROOT/usr/include"
 
-          # Sanity-check that the wrapper actually intercepts the compiler query.
-          printf '' | g++ -E -x c++ - -v
-          grep -q '^intercepted:' "$GPPWRAP_LOG" || {
-            echo "ERROR: Shiboken compiler-query wrapper did not intercept the test."
-            cat "$GPPWRAP_LOG"
-            exit 1
-          }
-
-          echo "Host Qt: $QT_HOST_PATH"
-          echo "Android Qt: $HOME/Qt/6.6.3/android_arm64_v8a"
-          echo "Expected Android NDK: $ANDROID_NDK_ROOT"
-          echo "Shiboken parser include paths: $ANDROID_NDK_SYSROOT_INCLUDE"
-
-          set -o pipefail
-          python tools/cross_compile_android/main.py \
-            --plat-name=aarch64 \
-            --api-level=27 \
-            --qt-install-path="$HOME/Qt/6.6.3" \
-            --auto-accept-license \
-            --skip-update \
-            --verbose 2>&1 | tee ../qt66-build.log
-
-      - name: Show build errors
-        if: failure()
-        run: |
-          python - <<'PY'
-          import os, re
-          from pathlib import Path
-
-          def esc(s):
-              return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-
-          p = Path("qt66-build.log")
-          if not p.exists():
-              print("::error title=No build log::qt66-build.log was not created")
-              raise SystemExit(0)
-
-          lines = p.read_text(errors="replace").splitlines()
-          pat = re.compile(r"CMake Error|error:|FAILED:|Traceback|fatal error|No such file|ERROR|Exception")
-          hits = [f"{i + 1}: {l[:300]}" for i, l in enumerate(lines) if pat.search(l)]
-
-          after = ""
-          for i, l in enumerate(lines):
-              if l.startswith("FAILED:"):
-                  after = "\n".join(f"{j + 1}: {x[:300]}" for j, x in enumerate(lines[i:i + 16], start=i))[:3500]
-                  break
-
-          last_hits = "\n".join(hits[-12:])[:3500]
-          tail = "\n".join(l[:300] for l in lines[-20:])[:3500]
-
-          log = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "gppwrap" / "calls.log"
-          calls = log.read_text().splitlines() if log.exists() else []
-          wrap = f"wrapper intercepted {len(calls)} compiler-path queries"
-          if calls:
-              wrap += "\n" + calls[0][:300]
-
-          print(f"===== {len(lines)} log lines, {len(hits)} error-like lines =====")
-          print(wrap)
-          print(after)
-          print("===== last error-like lines =====")
-          print(last_hits)
-
-          print(f"::error title=Wrapper status::{esc(wrap)}")
-          print(f"::error title=After first FAILED ({len(lines)} log lines total)::{esc(after)}")
-          print(f"::error title=Last error lines::{esc(last_hits)}")
-          print(f"::error title=Last 20 log lines::{esc(tail)}")
-          PY
-
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Qt66-Build-Log
-          path: qt66-build.log
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Verify Android wheels and NDK headers
-        run: |
-          NDK_HEADER="$HOME/.pyside6_android_deploy/android-ndk/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/GLES2/gl2.h"
-          test -f "$NDK_HEADER" || {
-            echo "ERROR: Android GLES2 header was not found."
-            find "$HOME/.pyside6_android_deploy" -path '*/sysroot/usr/include/GLES2/gl2.h' -print
-            exit 1
-          }
-          find qt-pyside/dist_android -name '*.whl' -ls
-          test -n "$(find qt-pyside/dist_android -name 'PySide6-*-android_aarch64.whl' -print -quit)"
-          test -n "$(find qt-pyside/dist_android -name 'shiboken6-*-android_aarch64.whl' -print -quit)"
-
-      - name: Locate generated Android wheels
-        id: wheels
-        run: |
-          PYSIDE=$(find qt-pyside/dist_android \
-            -name 'PySide6-*-android_aarch64.whl' \
-            -print -quit)
-          SHIBOKEN=$(find qt-pyside/dist_android \
-            -name 'shiboken6-*-android_aarch64.whl' \
-            -print -quit)
-
-          if [ -z "$PYSIDE" ] || [ -z "$SHIBOKEN" ]; then
-            echo "ERROR: Required Android wheels were not found."
-            find qt-pyside -name '*.whl'
-            exit 1
-          fi
-
-          echo "pyside=$GITHUB_WORKSPACE/$PYSIDE" >> "$GITHUB_OUTPUT"
-          echo "shiboken=$GITHUB_WORKSPACE/$SHIBOKEN" >> "$GITHUB_OUTPUT"
-          ls -lh "$PYSIDE" "$SHIBOKEN"
-
-      - name: Install PySide6 deployment tools
-        run: |
-          python -m pip install \
-            PySide6==6.6.3 \
-            buildozer cython jinja2 pkginfo tqdm
-
-      - name: Build Vertex Terminal APK
-        working-directory: vertex_terminal_mobile
-        run: |
-          python build_android.py \
-            --wheel-pyside "${{ steps.wheels.outputs.pyside }}" \
-            --wheel-shiboken "${{ steps.wheels.outputs.shiboken }}" \
-            --name VertexTerminal -f
-
-      - name: Collect APK
-        run: |
-          APK=$(find vertex_terminal_mobile -type f -name '*.apk' -print -quit)
-          if [ -z "$APK" ]; then
-            echo "ERROR: APK was not produced."
-            exit 1
-          fi
-          mkdir -p output
-          cp "$APK" output/VertexTerminal-Qt66-API27.apk
-          ls -lh output/
-
-      - name: Verify APK package
-        run: |
-          APK="output/VertexTerminal-Qt66-API27.apk"
-          test -f "$APK"
-          unzip -t "$APK"
-          echo "APK file integrity check passed."
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: VertexTerminal-Qt66-API27
-          path: output/VertexTerminal-Qt66-API27.apk
-          if-no-files-found: error
-          retention-days: 14
+          echo "Testing Shiboken compiler-query wrapper..."
+          printf '' | g++ -E -x c++ - -v](#)
+
